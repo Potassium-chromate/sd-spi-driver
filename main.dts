@@ -1,0 +1,19 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2835";
+
+    fragment@0 {
+        target = <&spi0>;   // use spi0; change if you want spi1, spi2...
+        __overlay__ {
+            status = "okay";
+
+            sdspi0: sdspi@0 {
+                compatible = "ncku,sdspi";
+                reg = <0>;                   // chip select 0
+                spi-max-frequency = <400000>;
+            };
+        };
+    };
+};
