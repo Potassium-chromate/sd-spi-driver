@@ -6,6 +6,7 @@
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
 #include <linux/delay.h> 
+#include <linux/ktime.h>
 
 #include "sdspi_ioctl.h"
 
@@ -138,6 +139,8 @@ static int sdspi_read_block(struct sdspi_dev *dev, u32 lba, u8 *buf)
     u32 addr;
     u8 resp, token;
     int i, timeout;
+    ktime_t start, end;
+    s64 delta_ns;
 
     mutex_lock(&dev->lock);
 
@@ -146,10 +149,11 @@ static int sdspi_read_block(struct sdspi_dev *dev, u32 lba, u8 *buf)
         goto out;
     }
 
-    /* Convert LBA to byte address if not HC */
     addr = dev->hc ? lba : lba * 512;
 
-    /* CMD17 = READ_SINGLE_BLOCK */
+    start = ktime_get();  /* ---- START TIMING ---- */
+
+    /* CMD17 */
     resp = send_cmd(dev->spi, 17, addr, 0x01);
     if (resp != 0x00) {
         pr_err("sdspi: CMD17 failed (resp=0x%02x)\n", resp);
@@ -157,7 +161,7 @@ static int sdspi_read_block(struct sdspi_dev *dev, u32 lba, u8 *buf)
         goto out;
     }
 
-    /* Wait for data token 0xFE */
+    /* Wait for token */
     timeout = 10000;
     do {
         token = sd_xchg_byte(dev->spi, 0xFF);
@@ -169,21 +173,27 @@ static int sdspi_read_block(struct sdspi_dev *dev, u32 lba, u8 *buf)
         goto out;
     }
 
-    /* Read 512-byte block */
     for (i = 0; i < 512; i++)
         buf[i] = sd_xchg_byte(dev->spi, 0xFF);
 
-    /* Read and discard 2 CRC bytes */
+    /* discard CRC */
     sd_xchg_byte(dev->spi, 0xFF);
     sd_xchg_byte(dev->spi, 0xFF);
 
-    ret = 0; /* success */
+    end = ktime_get();  /* ---- END TIMING ---- */
+    delta_ns = ktime_to_ns(ktime_sub(end, start));
+
+    if (delta_ns > 0) {
+        u64 speed = (512ULL * NSEC_PER_SEC) / delta_ns;
+        pr_info("sdspi: read 512B in %lld ns -> %llu B/s\n",
+                delta_ns, speed);
+    }
 
 out:
     mutex_unlock(&dev->lock);
-    pr_info("sdspi: sdspi_read_block success\n");
     return ret;
 }
+
 
 static int sdspi_write_block(struct sdspi_dev *dev, u32 lba, const u8 *buf)
 {
@@ -191,6 +201,8 @@ static int sdspi_write_block(struct sdspi_dev *dev, u32 lba, const u8 *buf)
     u8 resp;
     int i, timeout;
     int ret = 0;
+    ktime_t start, end;
+    s64 delta_ns;
 
     mutex_lock(&dev->lock);
 
@@ -199,10 +211,10 @@ static int sdspi_write_block(struct sdspi_dev *dev, u32 lba, const u8 *buf)
         goto out;
     }
 
-    /* Convert LBA to byte address if not HC */
     addr = dev->hc ? lba : lba * 512;
 
-    /* CMD24 = WRITE_SINGLE_BLOCK */
+    start = ktime_get();  /* ---- START TIMING ---- */
+
     resp = send_cmd(dev->spi, 24, addr, 0x01);
     if (resp != 0x00) {
         pr_err("sdspi: CMD24 failed (resp=0x%02x)\n", resp);
@@ -210,17 +222,13 @@ static int sdspi_write_block(struct sdspi_dev *dev, u32 lba, const u8 *buf)
         goto out;
     }
 
-    /* One byte gap */
-    sd_xchg_byte(dev->spi, 0xFF);
+    sd_xchg_byte(dev->spi, 0xFF);  /* gap */
+    sd_xchg_byte(dev->spi, 0xFE);  /* start token */
 
-    /* Start token */
-    sd_xchg_byte(dev->spi, 0xFE);
-
-    /* Write 512 data bytes */
     for (i = 0; i < 512; i++)
         sd_xchg_byte(dev->spi, buf[i]);
 
-    /* Two dummy CRC bytes */
+    /* CRC */
     sd_xchg_byte(dev->spi, 0xFF);
     sd_xchg_byte(dev->spi, 0xFF);
 
@@ -232,8 +240,7 @@ static int sdspi_write_block(struct sdspi_dev *dev, u32 lba, const u8 *buf)
         goto out;
     }
 
-    /* Wait while card is busy (MISO = 0) */
-    timeout = 50000; /* ~50ms max */
+    timeout = 50000;
     do {
         resp = sd_xchg_byte(dev->spi, 0xFF);
         if (resp == 0xFF)
@@ -247,12 +254,20 @@ static int sdspi_write_block(struct sdspi_dev *dev, u32 lba, const u8 *buf)
         goto out;
     }
 
-    ret = 0; /* success */
+    end = ktime_get();  /* ---- END TIMING ---- */
+    delta_ns = ktime_to_ns(ktime_sub(end, start));
+
+    if (delta_ns > 0) {
+        u64 speed = (512ULL * NSEC_PER_SEC) / delta_ns;
+        pr_info("sdspi: wrote 512B in %lld ns -> %llu B/s\n",
+                delta_ns, speed);
+    }
 
 out:
     mutex_unlock(&dev->lock);
     return ret;
 }
+
 /* ------------ miscdevice (char dev) ------------- */
 
 static long sdspi_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
